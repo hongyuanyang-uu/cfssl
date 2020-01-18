@@ -184,11 +184,16 @@ func ParseCertificateRequest(s Signer, csrBytes []byte) (template *x509.Certific
 		return
 	}
 
+	sigAlgo := s.SigAlgo()
+	if sigAlgo== x509.UnknownSignatureAlgorithm {
+		sigAlgo = 	 x509.ECDSAWithSHA256
+	}
+
 	template = &x509.Certificate{
 		Subject:            csrv.Subject,
 		PublicKeyAlgorithm: csrv.PublicKeyAlgorithm,
 		PublicKey:          csrv.PublicKey,
-		SignatureAlgorithm: s.SigAlgo(),
+		SignatureAlgorithm: sigAlgo,
 		DNSNames:           csrv.DNSNames,
 		IPAddresses:        csrv.IPAddresses,
 		EmailAddresses:     csrv.EmailAddresses,
