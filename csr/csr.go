@@ -20,6 +20,7 @@ import (
 	cferr "github.com/cloudflare/cfssl/errors"
 	"github.com/cloudflare/cfssl/helpers"
 	"github.com/cloudflare/cfssl/log"
+	"github.com/tjfoc/gmsm/sm2"
 )
 
 const (
@@ -406,8 +407,82 @@ func Generate(priv crypto.Signer, req *CertificateRequest) (csr []byte, err erro
 	return
 }
 
+// Generate creates a new CSR from a CertificateRequest structure and
+// an existing key. The KeyRequest field is ignored.
+func GenerateSM2(priv crypto.Signer, req *CertificateRequest) (csr []byte, err error) {
+	sigAlgo := helpers.SignerAlgo(priv)
+	var sm2SigAlgo sm2.SignatureAlgorithm
+	if sigAlgo == x509.UnknownSignatureAlgorithm {
+		sm2SigAlgo = sm2.ECDSAWithSHA256
+		//return nil, cferr.New(cferr.PrivateKeyError, cferr.Unavailable)
+	}
+
+	var tpl = sm2.CertificateRequest{
+		Subject:            req.Name(),
+		SignatureAlgorithm: sm2SigAlgo,
+	}
+
+	for i := range req.Hosts {
+		if ip := net.ParseIP(req.Hosts[i]); ip != nil {
+			tpl.IPAddresses = append(tpl.IPAddresses, ip)
+		} else if email, err := mail.ParseAddress(req.Hosts[i]); err == nil && email != nil {
+			tpl.EmailAddresses = append(tpl.EmailAddresses, email.Address)
+		} else if uri, err := url.ParseRequestURI(req.Hosts[i]); err == nil && uri != nil {
+			tpl.URIs = append(tpl.URIs, uri)
+		} else {
+			tpl.DNSNames = append(tpl.DNSNames, req.Hosts[i])
+		}
+	}
+
+	if req.CA != nil {
+		err = appendCAInfoToCSRSm2(req.CA, &tpl)
+		if err != nil {
+			err = cferr.Wrap(cferr.CSRError, cferr.GenerationFailed, err)
+			return
+		}
+	}
+
+	csr, err = sm2.CreateCertificateRequest(rand.Reader, &tpl, priv)
+	if err != nil {
+		log.Errorf("failed to generate a CSR: %v", err)
+		err = cferr.Wrap(cferr.CSRError, cferr.BadRequest, err)
+		return
+	}
+	block := pem.Block{
+		Type:  "CERTIFICATE REQUEST",
+		Bytes: csr,
+	}
+
+	log.Info("encoded CSR")
+	csr = pem.EncodeToMemory(&block)
+	return
+}
+
 // appendCAInfoToCSR appends CAConfig BasicConstraint extension to a CSR
 func appendCAInfoToCSR(reqConf *CAConfig, csr *x509.CertificateRequest) error {
+	pathlen := reqConf.PathLength
+	if pathlen == 0 && !reqConf.PathLenZero {
+		pathlen = -1
+	}
+	val, err := asn1.Marshal(BasicConstraints{true, pathlen})
+
+	if err != nil {
+		return err
+	}
+
+	csr.ExtraExtensions = []pkix.Extension{
+		{
+			Id:       asn1.ObjectIdentifier{2, 5, 29, 19},
+			Value:    val,
+			Critical: true,
+		},
+	}
+
+	return nil
+}
+
+// appendCAInfoToCSR appends CAConfig BasicConstraint extension to a CSR
+func appendCAInfoToCSRSm2(reqConf *CAConfig, csr *sm2.CertificateRequest) error {
 	pathlen := reqConf.PathLength
 	if pathlen == 0 && !reqConf.PathLenZero {
 		pathlen = -1
