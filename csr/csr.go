@@ -413,7 +413,7 @@ func GenerateSM2(priv crypto.Signer, req *CertificateRequest) (csr []byte, err e
 	sigAlgo := helpers.SignerAlgo(priv)
 	var sm2SigAlgo sm2.SignatureAlgorithm
 	if sigAlgo == x509.UnknownSignatureAlgorithm {
-		sm2SigAlgo = sm2.ECDSAWithSHA256
+		sm2SigAlgo = sm2.SM2WithSM3
 		//return nil, cferr.New(cferr.PrivateKeyError, cferr.Unavailable)
 	}
 
