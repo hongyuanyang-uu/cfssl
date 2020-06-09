@@ -21,6 +21,7 @@ import (
 	"github.com/cloudflare/cfssl/csr"
 	cferr "github.com/cloudflare/cfssl/errors"
 	"github.com/cloudflare/cfssl/info"
+	"github.com/tjfoc/gmsm/sm2"
 )
 
 // Subject contains the information that should be used to override the
@@ -171,7 +172,7 @@ func DefaultSigAlgo(priv crypto.Signer) x509.SignatureAlgorithm {
 
 // ParseCertificateRequest takes an incoming certificate request and
 // builds a certificate template from it.
-func ParseCertificateRequest(s Signer, p *config.SigningProfile, csrBytes []byte) (template *x509.Certificate, err error) {
+func ParseCertificateRequest(s Signer, csrBytes []byte) (template *x509.Certificate, err error) {
 	csrv, err := x509.ParseCertificateRequest(csrBytes)
 	if err != nil {
 		err = cferr.Wrap(cferr.CSRError, cferr.ParseFailed, err)
@@ -184,17 +185,20 @@ func ParseCertificateRequest(s Signer, p *config.SigningProfile, csrBytes []byte
 		return
 	}
 
+	sigAlgo := s.SigAlgo()
+	if sigAlgo== x509.UnknownSignatureAlgorithm {
+		sigAlgo = 	 x509.ECDSAWithSHA256
+	}
+
 	template = &x509.Certificate{
 		Subject:            csrv.Subject,
 		PublicKeyAlgorithm: csrv.PublicKeyAlgorithm,
 		PublicKey:          csrv.PublicKey,
-		SignatureAlgorithm: s.SigAlgo(),
+		SignatureAlgorithm: sigAlgo,
 		DNSNames:           csrv.DNSNames,
 		IPAddresses:        csrv.IPAddresses,
 		EmailAddresses:     csrv.EmailAddresses,
 		URIs:               csrv.URIs,
-		Extensions:			csrv.Extensions,
-		ExtraExtensions:	[]pkix.Extension{},
 	}
 
 	for _, val := range csrv.Extensions {
@@ -214,11 +218,6 @@ func ParseCertificateRequest(s Signer, p *config.SigningProfile, csrBytes []byte
 			template.IsCA = constraints.IsCA
 			template.MaxPathLen = constraints.MaxPathLen
 			template.MaxPathLenZero = template.MaxPathLen == 0
-		} else {
-			// If the profile has 'copy_extensions' to true then lets add it
-			if (p.CopyExtensions) {
-				template.ExtraExtensions = append(template.ExtraExtensions, val)
-			}
 		}
 	}
 
@@ -236,6 +235,23 @@ type subjectPublicKeyInfo struct {
 func ComputeSKI(template *x509.Certificate) ([]byte, error) {
 	pub := template.PublicKey
 	encodedPub, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return nil, err
+	}
+
+	var subPKI subjectPublicKeyInfo
+	_, err = asn1.Unmarshal(encodedPub, &subPKI)
+	if err != nil {
+		return nil, err
+	}
+
+	pubHash := sha1.Sum(subPKI.SubjectPublicKey.Bytes)
+	return pubHash[:], nil
+}
+
+func ComputeSKISM2(template *sm2.Certificate) ([]byte, error) {
+	pub := template.PublicKey
+	encodedPub, err := sm2.MarshalPKIXPublicKey(pub)
 	if err != nil {
 		return nil, err
 	}

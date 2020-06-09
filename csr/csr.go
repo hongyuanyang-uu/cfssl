@@ -20,6 +20,7 @@ import (
 	cferr "github.com/cloudflare/cfssl/errors"
 	"github.com/cloudflare/cfssl/helpers"
 	"github.com/cloudflare/cfssl/log"
+	"github.com/tjfoc/gmsm/sm2"
 )
 
 const (
@@ -138,7 +139,6 @@ type CertificateRequest struct {
 	KeyRequest   *KeyRequest `json:"key,omitempty" yaml:"key,omitempty"`
 	CA           *CAConfig  `json:"ca,omitempty" yaml:"ca,omitempty"`
 	SerialNumber string     `json:"serialnumber,omitempty" yaml:"serialnumber,omitempty"`
-	Extensions   []pkix.Extension `json:"extensions,omitempty" yaml:"extensions,omitempty"`
 }
 
 // New returns a new, empty CertificateRequest with a
@@ -383,8 +383,6 @@ func Generate(priv crypto.Signer, req *CertificateRequest) (csr []byte, err erro
 		}
 	}
 
-	tpl.ExtraExtensions = []pkix.Extension{}
-
 	if req.CA != nil {
 		err = appendCAInfoToCSR(req.CA, &tpl)
 		if err != nil {
@@ -393,15 +391,58 @@ func Generate(priv crypto.Signer, req *CertificateRequest) (csr []byte, err erro
 		}
 	}
 
-	if req.Extensions != nil {
-		err = appendExtensionsToCSR(req.Extensions, &tpl)
+	csr, err = x509.CreateCertificateRequest(rand.Reader, &tpl, priv)
+	if err != nil {
+		log.Errorf("failed to generate a CSR: %v", err)
+		err = cferr.Wrap(cferr.CSRError, cferr.BadRequest, err)
+		return
+	}
+	block := pem.Block{
+		Type:  "CERTIFICATE REQUEST",
+		Bytes: csr,
+	}
+
+	log.Info("encoded CSR")
+	csr = pem.EncodeToMemory(&block)
+	return
+}
+
+// Generate creates a new CSR from a CertificateRequest structure and
+// an existing key. The KeyRequest field is ignored.
+func GenerateSM2(priv crypto.Signer, req *CertificateRequest) (csr []byte, err error) {
+	sigAlgo := helpers.SignerAlgo(priv)
+	var sm2SigAlgo sm2.SignatureAlgorithm
+	if sigAlgo == x509.UnknownSignatureAlgorithm {
+		sm2SigAlgo = sm2.SM2WithSM3
+		//return nil, cferr.New(cferr.PrivateKeyError, cferr.Unavailable)
+	}
+
+	var tpl = sm2.CertificateRequest{
+		Subject:            req.Name(),
+		SignatureAlgorithm: sm2SigAlgo,
+	}
+
+	for i := range req.Hosts {
+		if ip := net.ParseIP(req.Hosts[i]); ip != nil {
+			tpl.IPAddresses = append(tpl.IPAddresses, ip)
+		} else if email, err := mail.ParseAddress(req.Hosts[i]); err == nil && email != nil {
+			tpl.EmailAddresses = append(tpl.EmailAddresses, email.Address)
+		} else if uri, err := url.ParseRequestURI(req.Hosts[i]); err == nil && uri != nil {
+			tpl.URIs = append(tpl.URIs, uri)
+		} else {
+			tpl.DNSNames = append(tpl.DNSNames, req.Hosts[i])
+		}
+	}
+
+	if req.CA != nil {
+		err = appendCAInfoToCSRSm2(req.CA, &tpl)
 		if err != nil {
 			err = cferr.Wrap(cferr.CSRError, cferr.GenerationFailed, err)
 			return
 		}
 	}
 
-	csr, err = x509.CreateCertificateRequest(rand.Reader, &tpl, priv)
+	csr, err = sm2.CreateCertificateRequest(rand.Reader, &tpl, priv)
 	if err != nil {
 		log.Errorf("failed to generate a CSR: %v", err)
 		err = cferr.Wrap(cferr.CSRError, cferr.BadRequest, err)
@@ -429,19 +470,36 @@ func appendCAInfoToCSR(reqConf *CAConfig, csr *x509.CertificateRequest) error {
 		return err
 	}
 
-	csr.ExtraExtensions = append(csr.ExtraExtensions, pkix.Extension{
-			Id:       asn1.ObjectIdentifier{2, 5, 29, 19},			
+	csr.ExtraExtensions = []pkix.Extension{
+		{
+			Id:       asn1.ObjectIdentifier{2, 5, 29, 19},
 			Value:    val,
-			Critical: true,		
-		})
+			Critical: true,
+		},
+	}
 
-		return nil
+	return nil
 }
 
-// appendCAInfoToCSR appends user-defined extension to a CSR
-func appendExtensionsToCSR(extensions []pkix.Extension, csr *x509.CertificateRequest) error {
-	for _, extension := range extensions {
-		csr.ExtraExtensions = append(csr.ExtraExtensions, extension)
+// appendCAInfoToCSR appends CAConfig BasicConstraint extension to a CSR
+func appendCAInfoToCSRSm2(reqConf *CAConfig, csr *sm2.CertificateRequest) error {
+	pathlen := reqConf.PathLength
+	if pathlen == 0 && !reqConf.PathLenZero {
+		pathlen = -1
 	}
+	val, err := asn1.Marshal(BasicConstraints{true, pathlen})
+
+	if err != nil {
+		return err
+	}
+
+	csr.ExtraExtensions = []pkix.Extension{
+		{
+			Id:       asn1.ObjectIdentifier{2, 5, 29, 19},
+			Value:    val,
+			Critical: true,
+		},
+	}
+
 	return nil
 }
